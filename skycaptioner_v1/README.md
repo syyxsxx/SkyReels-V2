@@ -188,9 +188,9 @@ We use [Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct) 
 
 ```shell
 # download SkyCaptioner-V1
-huggingface-cli download Skywork/SkyCaptioner-V1 --local_dir /path/to/your_local_model_path
+huggingface-cli download Skywork/SkyCaptioner-V1 --local-dir /path/to/your_local_model_path
 # download Qwen2.5-32B-Instruct
-huggingface-cli download Qwen/Qwen2.5-32B-Instruct --local_dir /path/to/your_local_model_path2
+huggingface-cli download Qwen/Qwen2.5-32B-Instruct --local-dir /path/to/your_local_model_path2
 ```
 
 ## 🛠️ Running Guide
