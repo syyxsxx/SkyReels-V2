@@ -224,6 +224,9 @@ The prompt enhancer is implemented based on <a href="https://huggingface.co/Qwen
 cd skyreels_v2_infer/pipelines
 python3 prompt_enhancer.py --prompt "A serene lake surrounded by towering mountains, with a few swans gracefully gliding across the water and sunlight dancing on the surface."
 ```
+> **Note**: 
+> - `--prompt_enhancer` is not allowed if using `--use_usp`. We recommend running the skyreels_v2_infer/pipelines/prompt_enhancer.py script first to generate enhanced prompt before enabling the `--use_usp` parameter.
+
 
 **Advanced Configuration Options**
 
