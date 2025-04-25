@@ -131,10 +131,6 @@ if __name__ == "__main__":
                                              teacache_thresh=args.teacache_thresh, use_ret_steps=args.use_ret_steps, 
                                              ckpt_dir=args.model_id)
         
-    prompt_input = args.prompt
-    if args.prompt_enhancer and image is not None:
-        prompt_input = prompt_enhancer(prompt_input)
-        print(f"enhanced prompt: {prompt_input}")
 
     kwargs = {
         "prompt": prompt_input,
