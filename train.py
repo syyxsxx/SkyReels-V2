@@ -84,6 +84,13 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--weighting_scheme",
+        type=str,
+        default="logit_normal",
+        choices=["sigma_sqrt", "logit_normal", "mode", "cosmap"],
+    )
+
+    parser.add_argument(
         "--gradient_checkpointing",
         type=bool,
         default=True,
@@ -193,6 +200,21 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--logit_std", type=float, default=1.0, help="std to use when using the `'logit_normal'` weighting scheme."
+    )
+
+    parser.add_argument(
+        "--mode_scale",
+        type=float,
+        default=1.29,
+        help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
+    )
+
+    parser.add_argument(
+        "--logit_mean", type=float, default=0.0, help="mean to use when using the `'logit_normal'` weighting scheme."
+    )
+
+    parser.add_argument(
         "--max_train_steps",
         type=int,
         default=None,
@@ -274,48 +296,49 @@ def ffop_timestep_scheduler(T, F, t):
             mat_e[t, f] = mat_e[t - 1, f] + mat_e[t, f - 1]
     
     # compute the timesteps matrix on f dim
-    timesteps_matrix = np.zeros(F)
+    timesteps_vec = np.zeros(F)
     curf = np.random.randint(T)
-    timesteps_matrix[curf] = t
+    timesteps_vec[curf] = t
     
     # get the timesteps from f-1 to 0
     for f in range(curf - 1, -1, -1):
         # print(f, timesteps[f+1], self.mat_e)
-        candidate_weights = mat_e[:int(timesteps_matrix[f+1]) + 1, f]
+        candidate_weights = mat_e[:int(timesteps_vec[f+1]) + 1, f]
         sum_weight = np.sum(candidate_weights)
         prob_sequence = candidate_weights / sum_weight
-        cur_step = np.random.choice(range(0, int(timesteps_matrix[f+1]) + 1), 
+        cur_step = np.random.choice(range(0, int(timesteps_vec[f+1]) + 1), 
                                     p=prob_sequence)
-        timesteps_matrix[f] = int(cur_step)
+        timesteps_vec[f] = int(cur_step)
     
     # get the timesteps from f+1 to F
     for f in range(curf + 1, F):
-        candidate_weights = mat_s[int(timesteps_matrix[f-1]):, f]
+        candidate_weights = mat_s[int(timesteps_vec[f-1]):, f]
         sum_weight = np.sum(candidate_weights)
         prob_sequence = candidate_weights / sum_weight
-        cur_step = np.random.choice(range(int(timesteps_matrix[f-1]), self.T), 
+        cur_step = np.random.choice(range(int(timesteps_vec[f-1]), self.T), 
                                     p=prob_sequence)
-        timesteps_matrix[f] = int(cur_step)
+        timesteps_vec[f] = int(cur_step)
     
-    return timesteps_matrix
+    return timesteps_vec
 
 
-def get_noisy_model_input(T, F, ts, sigmas, x, noise):
+def get_noisy_model_input(T, F, sample_t, sigmas, x, noise, device):
     '''
     T: total time step for training
     F: total frame
-    ts: sample timestep for batch
+    t: sample timestep
     '''
     noisy_model_input = x
     bt = []
     sigmas_t = []
-    for i, one_batch_timestep in enumerate(ts):
-        timesteps_matrix = (T, F, one_batch_timestep)
-        bt.append(timesteps_matrix)
-        for j, t in enumerate(timesteps_matrix):
-            sigma = sigmas[t.long()]
-            sigmas_t.append(sigma)
-            noisy_model_input[i,:,j,:,:,] = noisy_model_input[i,:,j,:,:,] * (1.0 - sigma) + noise * sigma
+    timesteps_vec = (T, F, sample_t)
+    bt.append(timesteps_vec)
+    for t in timesteps_vec:
+        sigma = sigmas[t].float()
+        sigmas_t.append(sigma)
+    sigmas_t = torch.tensor(sigmas_t, dtype=torch.float32).to(device)
+    sigmas_t = sigmas_t.view(1, -1, 1, 1)
+    noisy_model_input = noisy_model_input * (1.0 - sigmas_t) + noise * sigmas_t
     
     return noisy_model_input, bt, sigmas_t
 
@@ -359,11 +382,10 @@ def main(args):
     #load model and scheduler
     noise_scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=args.num_train_timesteps)
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-    device = "cuda"
     weight_dtype = torch.bfloat16
     vae_model_path = os.path.join(args.model_path, "Wan2.1_VAE.pth")
-    vae = get_vae(vae_model_path, device, weight_dtype=torch.float32)
-    text_encoder = get_text_encoder(model_path, device, weight_dtype)
+    vae = get_vae(vae_model_path, accelerator.device, weight_dtype=torch.float32)
+    text_encoder = get_text_encoder(model_path, accelerator.device, weight_dtype)
 
     # load wan model for train
     config_path = os.path.join(args.dit_path, "config.json")
@@ -569,33 +591,37 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(wan_model):
                 with torch.no_grad():
-                    latents = vae.encode().latent_dist.sample()
+                    video = video_processor(batch)
+                    # [(c, f, h, w)]
+                    latents = vae.encode(video)
                 noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
-                F = latents.shape[2]
-                '''
-                do not use normal distribution sample
+                F = latents[0].shape(1)
+                '''use normal distribution sample
                 u = compute_density_for_timestep_sampling(
                     weighting_scheme=args.weighting_scheme,
-                    batch_size=bsz,
+                    batch_size=1,
                     logit_mean=args.logit_mean,
                     logit_std=args.logit_std,
                     mode_scale=args.mode_scale,
                 )
                 indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
                 '''
-                timesteps = []
-                for b in bsz:
-                    indices = np.random.randint(0, args.num_train_timesteps)
-                    timesteps.append(noise_scheduler_copy.timesteps[indices])
+                indices = np.random.randint(0, args.num_train_timesteps)
+                t = noise_scheduler_copy.timesteps[indices]
                 sigmas = noise_scheduler_copy.sigmas.to(device=accelerator.device, dtype=dtype)
-                noisy_model_input, bt = get_noisy_model_input(args.num_train_timesteps, F, timesteps, sigmas, latents, noise)
+                noisy_model_input, bt = get_noisy_model_input(args.num_train_timesteps, F, t, sigmas, latents, noise, accelerator.device)
                 prompt_embeds = text_encoder.encode(prompt).to(self.transformer.dtype)
-                model_pred = wan_model(noisy_model_input[0], bt, prompt_embeds)
+                model_pred = wan_model(torch.stack([noisy_model_input]), torch.stack(bt, dim=0), prompt_embeds)
                 if args.precondition_outputs:
                     model_pred = model_pred * (-sigmas_t) + noisy_model_input
+                
+                if args.precondition_outputs:
+                    target = latents
+                else:
+                    target = noise - latent
+
                 loss = torch.mean(
-                     (model_pred.float() - target.float() ** 2).reshape(target.shape[0], -1),
+                     ((model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
                     1,
                 )
                 loss = loss.mean()
